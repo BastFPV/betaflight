@@ -1,0 +1,27 @@
+name: Build Betaflight
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Download source
+      uses: actions/checkout@v4
+
+    - name: Install tools
+      run: |
+        sudo apt update
+        sudo apt install -y gcc-arm-none-eabi
+
+    - name: Build BETAFPVG473
+      run: |
+        make BETAFPVG473
+
+    - name: Upload firmware
+      uses: actions/upload-artifact@v4
+      with:
+        name: firmware
+        path: obj/*.bin
