@@ -29,7 +29,7 @@
 
 #include "sensors/esc_sensor.h"
 
-#define OSD_NUM_TIMER_TYPES 5
+#define OSD_NUM_TIMER_TYPES 4
 extern const char * const osdTimerSourceNames[OSD_NUM_TIMER_TYPES];
 
 #define OSD_ELEMENT_BUFFER_LENGTH 32
@@ -50,12 +50,8 @@ extern const char * const osdTimerSourceNames[OSD_NUM_TIMER_TYPES];
 #define OSD_CAMERA_FRAME_MAX_HEIGHT 16    // Rows supported by MAX7456 (PAL)
 
 #define OSD_FRAMERATE_MIN_HZ 1
-#ifndef OSD_FRAMERATE_MAX_HZ
 #define OSD_FRAMERATE_MAX_HZ 60
-#endif
-#ifndef OSD_FRAMERATE_DEFAULT_HZ
 #define OSD_FRAMERATE_DEFAULT_HZ 12
-#endif
 
 #define OSD_PROFILE_BITS_POS 11
 #define OSD_PROFILE_MASK    (((1 << OSD_PROFILE_COUNT) - 1) << OSD_PROFILE_BITS_POS)
@@ -63,6 +59,7 @@ extern const char * const osdTimerSourceNames[OSD_NUM_TIMER_TYPES];
 #define OSD_POSCFG_MAX UINT16_MAX  // element positions now use all 16 bits
 #define OSD_PROFILE_FLAG(x)  (1 << ((x) - 1 + OSD_PROFILE_BITS_POS))
 #define OSD_PROFILE_1_FLAG  OSD_PROFILE_FLAG(1)
+
 
 #ifdef USE_OSD_PROFILES
 #define VISIBLE(x) osdElementVisible(x)
@@ -72,19 +69,18 @@ extern const char * const osdTimerSourceNames[OSD_NUM_TIMER_TYPES];
 #define VISIBLE_IN_OSD_PROFILE(item, profile) VISIBLE(item)
 #endif
 
+
 // Character coordinate
 #define OSD_POSITION_BITS       5       // 5 bits gives a range 0-31
 #define OSD_POSITION_BIT_XHD    10      // extra bit used to extend X range in a backward compatible manner for HD displays
 #define OSD_POSITION_XHD_MASK   (1 << OSD_POSITION_BIT_XHD)
 #define OSD_POSITION_XY_MASK    ((1 << OSD_POSITION_BITS) - 1)
 #define OSD_TYPE_MASK           0xC000  // bits 14-15
-#define OSD_POS(x, y)  (((x) & OSD_POSITION_XY_MASK)                    \
-                        | (((x) << (OSD_POSITION_BIT_XHD - OSD_POSITION_BITS)) & OSD_POSITION_XHD_MASK) \
-                        | (((y) & OSD_POSITION_XY_MASK) << OSD_POSITION_BITS)) \
-    /**/
-#define OSD_X(x)      (((x) & OSD_POSITION_XY_MASK) | (((x) & OSD_POSITION_XHD_MASK) >> (OSD_POSITION_BIT_XHD - OSD_POSITION_BITS)))
-#define OSD_Y(x)      (((x) >> OSD_POSITION_BITS) & OSD_POSITION_XY_MASK)
-#define OSD_TYPE(x)   (((x) & OSD_TYPE_MASK) >> 14)
+#define OSD_POS(x,y)  ((x & OSD_POSITION_XY_MASK) | ((x << (OSD_POSITION_BIT_XHD - OSD_POSITION_BITS)) & OSD_POSITION_XHD_MASK) | \
+                       ((y & OSD_POSITION_XY_MASK) << OSD_POSITION_BITS))
+#define OSD_X(x)      ((x & OSD_POSITION_XY_MASK) | ((x & OSD_POSITION_XHD_MASK) >> (OSD_POSITION_BIT_XHD - OSD_POSITION_BITS)))
+#define OSD_Y(x)      ((x >> OSD_POSITION_BITS) & OSD_POSITION_XY_MASK)
+#define OSD_TYPE(x)   ((x & OSD_TYPE_MASK) >> 14)
 
 #define OSD_SD_COLS VIDEO_COLUMNS_SD
 #define OSD_SD_ROWS VIDEO_LINES_PAL
@@ -193,27 +189,6 @@ typedef enum {
     OSD_GPS_LAP_TIME_CURRENT,
     OSD_GPS_LAP_TIME_PREVIOUS,
     OSD_GPS_LAP_TIME_BEST3,
-    OSD_DEBUG2,
-    OSD_CUSTOM_MSG0,
-    OSD_CUSTOM_MSG1,
-    OSD_CUSTOM_MSG2,
-    OSD_CUSTOM_MSG3,
-    OSD_LIDAR_DIST,
-    OSD_CUSTOM_SERIAL_TEXT,
-    OSD_BATTERY_PROFILE_NAME,
-
-#if defined(USE_GPS) && ENABLE_FLIGHT_PLAN
-    // Waypoint elements
-    OSD_WP_NUMBER,              // "WP 3/12" - current/total
-    OSD_WP_CURRENT_LAT,         // Current waypoint latitude
-    OSD_WP_CURRENT_LON,         // Current waypoint longitude
-    OSD_WP_CURRENT_ALT,         // Current waypoint altitude
-    OSD_WP_DISTANCE,            // Distance to current waypoint
-    OSD_WP_DIRECTION,           // Direction arrow to current waypoint
-    OSD_WP_NEXT_NUMBER,         // "NEXT 4" - next waypoint number
-    OSD_WP_ETA,                 // Estimated time to waypoint
-#endif
-
     OSD_ITEM_COUNT // MUST BE LAST
 } osd_items_e;
 
@@ -277,7 +252,6 @@ typedef enum {
     OSD_TIMER_SRC_TOTAL_ARMED,
     OSD_TIMER_SRC_LAST_ARMED,
     OSD_TIMER_SRC_ON_OR_ARMED,
-    OSD_TIMER_SRC_LAUNCH_TIME,
     OSD_TIMER_SRC_COUNT
 } osd_timer_source_e;
 
@@ -294,20 +268,20 @@ typedef enum {
     OSD_WARNING_BATTERY_WARNING,
     OSD_WARNING_BATTERY_CRITICAL,
     OSD_WARNING_VISUAL_BEEPER,
-    OSD_WARNING_CRASHFLIP,
+    OSD_WARNING_CRASH_FLIP,
     OSD_WARNING_ESC_FAIL,
     OSD_WARNING_CORE_TEMPERATURE,
+    OSD_WARNING_RC_SMOOTHING,
     OSD_WARNING_FAIL_SAFE,
     OSD_WARNING_LAUNCH_CONTROL,
     OSD_WARNING_GPS_RESCUE_UNAVAILABLE,
-    OSD_WARNING_GPS_RESCUE_FAILING,
+    OSD_WARNING_GPS_RESCUE_DISABLED,
     OSD_WARNING_RSSI,
     OSD_WARNING_LINK_QUALITY,
     OSD_WARNING_RSSI_DBM,
     OSD_WARNING_OVER_CAP,
     OSD_WARNING_RSNR,
     OSD_WARNING_LOAD,
-    OSD_WARNING_POSHOLD_FAILED,
     OSD_WARNING_COUNT // MUST BE LAST
 } osdWarningsFlags_e;
 
@@ -317,7 +291,6 @@ typedef enum {
     OSD_DISPLAYPORT_DEVICE_MAX7456,
     OSD_DISPLAYPORT_DEVICE_MSP,
     OSD_DISPLAYPORT_DEVICE_FRSKYOSD,
-    OSD_DISPLAYPORT_DEVICE_FBOSD,
 } osdDisplayPortDevice_e;
 
 // Make sure the number of warnings do not exceed the available 32bit storage
@@ -327,7 +300,7 @@ STATIC_ASSERT(OSD_WARNING_COUNT <= 32, osdwarnings_overflow);
 #define ESC_TEMP_ALARM_OFF         0
 #define ESC_CURRENT_ALARM_OFF     -1
 
-#define OSD_GPS_RESCUE_DISABLED_WARNING_DURATION_US 5000000 // 5 seconds
+#define OSD_GPS_RESCUE_DISABLED_WARNING_DURATION_US 3000000 // 3 seconds
 
 extern const uint16_t osdTimerDefault[OSD_TIMER_COUNT];
 extern const osd_stats_e osdStatsDisplayOrder[OSD_STAT_COUNT];
@@ -382,7 +355,6 @@ typedef struct osdConfig_s {
 #ifdef USE_SPEC_PREARM_SCREEN
     uint8_t osd_show_spec_prearm;
 #endif // USE_SPEC_PREARM_SCREEN
-    displayPortSeverity_e arming_logo;        // font from which to display logo on arming
 } osdConfig_t;
 
 PG_DECLARE(osdConfig_t, osdConfig);
@@ -398,7 +370,7 @@ typedef struct statistic_s {
     int16_t max_speed;
     int16_t min_voltage; // /100
     uint16_t end_voltage;
-    int16_t max_current; // /100
+    int16_t max_current; // /10
     uint8_t min_rssi;
     int32_t max_altitude;
     int16_t max_distance;
@@ -413,8 +385,6 @@ typedef struct statistic_s {
 
 extern timeUs_t resumeRefreshAt;
 extern timeUs_t osdFlyTime;
-extern timeUs_t osdLaunchTime;
-
 #if defined(USE_ACC)
 extern float osdGForce;
 #endif

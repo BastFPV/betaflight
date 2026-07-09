@@ -55,12 +55,10 @@
 
 #include "drivers/display.h"
 #include "drivers/dshot.h"
-#include "drivers/flash/flash.h"
+#include "drivers/flash.h"
 #include "drivers/osd_symbols.h"
 #include "drivers/sdcard.h"
 #include "drivers/time.h"
-
-#include "drivers/pinio.h"
 
 #include "fc/core.h"
 #include "fc/gps_lap_timer.h"
@@ -114,8 +112,7 @@ const char * const osdTimerSourceNames[] = {
     "ON TIME  ",
     "TOTAL ARM",
     "LAST ARM ",
-    "ON/ARM   ",
-    "LAUNCH TIME",
+    "ON/ARM   "
 };
 
 #define OSD_LOGO_ROWS 4
@@ -128,8 +125,6 @@ const char * const osdTimerSourceNames[] = {
 #define IS_MID(X) (rcData[X] > 1250 && rcData[X] < 1750)
 
 timeUs_t osdFlyTime = 0;
-timeUs_t osdLaunchTime = 0;
-
 #if defined(USE_ACC)
 float osdGForce = 0;
 #endif
@@ -159,9 +154,9 @@ escSensorData_t *osdEscDataCombined;
 
 STATIC_ASSERT(OSD_POS_MAX == OSD_POS(63,31), OSD_POS_MAX_incorrect);
 
-PG_REGISTER_WITH_RESET_FN(osdConfig_t, osdConfig, PG_OSD_CONFIG, 13);
+PG_REGISTER_WITH_RESET_FN(osdConfig_t, osdConfig, PG_OSD_CONFIG, 12);
 
-PG_REGISTER_WITH_RESET_FN(osdElementConfig_t, osdElementConfig, PG_OSD_ELEMENT_CONFIG, 3);
+PG_REGISTER_WITH_RESET_FN(osdElementConfig_t, osdElementConfig, PG_OSD_ELEMENT_CONFIG, 1);
 
 // Controls the display order of the OSD post-flight statistics.
 // Adjust the ordering here to control how the post-flight stats are presented.
@@ -207,11 +202,14 @@ const osd_stats_e osdStatsDisplayOrder[OSD_STAT_COUNT] = {
     OSD_STAT_AVG_THROTTLE,
 };
 
-#define OSD_TASK_MARGIN                 1
-#define OSD_ELEMENT_MARGIN              4
+// Group elements in a number of groups to reduce task scheduling overhead
+#define OSD_GROUP_COUNT                 OSD_ITEM_COUNT
+// Aim to render a group of elements within a target time
+#define OSD_ELEMENT_RENDER_TARGET       30
 
+#define OSD_TASK_MARGIN                 1
 // Decay the estimated max task duration by 1/(1 << OSD_EXEC_TIME_SHIFT) on every invocation
-#define OSD_EXEC_TIME_SHIFT             5
+#define OSD_EXEC_TIME_SHIFT             8
 
 // Format a float to the specified number of decimal places with optional rounding.
 // OSD symbols can optionally be placed before and after the formatted number (use SYM_NONE for no symbol).
@@ -281,7 +279,7 @@ bool osdWarnGetState(uint8_t warningIndex)
 }
 
 #ifdef USE_OSD_PROFILES
-static void setOsdProfile(uint8_t value)
+void setOsdProfile(uint8_t value)
 {
     // 1 ->> 001
     // 2 ->> 010
@@ -364,7 +362,7 @@ void pgResetFn_osdConfig(osdConfig_t *osdConfig)
 #ifdef USE_RC_STATS
     osdStatSetState(OSD_STAT_FULL_THROTTLE_TIME, true);
     osdStatSetState(OSD_STAT_FULL_THROTTLE_COUNTER, true);
-    osdStatSetState(OSD_STAT_AVG_THROTTLE, true);
+    osdStatSetState(OSD_STAT_AVG_THROTTLE, true);    
 #endif
 
     osdConfig->timers[OSD_TIMER_1] = osdTimerDefault[OSD_TIMER_1];
@@ -456,7 +454,7 @@ void pgResetFn_osdElementConfig(osdElementConfig_t *osdElementConfig)
     for (unsigned i = 1; i <= OSD_PROFILE_COUNT; i++) {
         profileFlags |= OSD_PROFILE_FLAG(i);
     }
-    osdElementConfig->item_pos[OSD_WARNINGS] = OSD_POS((midCol - OSD_WARNINGS_PREFFERED_SIZE / 2), (midRow + 3)) | profileFlags;
+    osdElementConfig->item_pos[OSD_WARNINGS] = OSD_POS((midCol - 6), (midRow + 3)) | profileFlags;
 
     // Default to old fixed positions for these elements
     osdElementConfig->item_pos[OSD_CROSSHAIRS]         = OSD_POS((midCol - 2), (midRow - 1));
@@ -466,14 +464,14 @@ void pgResetFn_osdElementConfig(osdElementConfig_t *osdElementConfig)
     osdElementConfig->item_pos[OSD_UP_DOWN_REFERENCE]  = OSD_POS((midCol - 2), (midRow - 1));
 }
 
-static void osdDrawLogo(int x, int y, displayPortSeverity_e fontSel)
+static void osdDrawLogo(int x, int y)
 {
     // display logo and help
     int fontOffset = 160;
     for (int row = 0; row < OSD_LOGO_ROWS; row++) {
         for (int column = 0; column < OSD_LOGO_COLS; column++) {
             if (fontOffset <= SYM_END_OF_FONT)
-                displayWriteChar(osdDisplayPort, x + column, y + row, fontSel, fontOffset++);
+                displayWriteChar(osdDisplayPort, x + column, y + row, DISPLAYPORT_SEVERITY_NORMAL, fontOffset++);
         }
     }
 }
@@ -493,22 +491,13 @@ static void osdCompleteInitialization(void)
     displayBeginTransaction(osdDisplayPort, DISPLAY_TRANSACTION_OPT_RESET_DRAWING);
     displayClearScreen(osdDisplayPort, DISPLAY_CLEAR_WAIT);
 
-    // Display betaflight logo
-    osdDrawLogo(midCol - (OSD_LOGO_COLS) / 2, midRow - 5, DISPLAYPORT_SEVERITY_NORMAL);
+    osdDrawLogo(midCol - (OSD_LOGO_COLS) / 2, midRow - 5);
 
-    // sizeof includes the terminating NULL so add space for the V
-    char version_str_buf[sizeof(FC_VERSION_STRING) + 1];
-    tfp_sprintf(version_str_buf, "V%s", FC_VERSION_STRING);
-    size_t version_str_len = strlen(version_str_buf) + 1;
-
-    // For the OSD we only have uppercase
-    for (size_t i = 0; i < version_str_len; i++) {
-        version_str_buf[i] = toupper(version_str_buf[i]);
-    }
-    displayWrite(osdDisplayPort, midCol + 12 - version_str_len, midRow, DISPLAYPORT_SEVERITY_NORMAL, version_str_buf);
-
+    char string_buffer[30];
+    tfp_sprintf(string_buffer, "V%s", FC_VERSION_STRING);
+    displayWrite(osdDisplayPort, midCol + 5, midRow, DISPLAYPORT_SEVERITY_NORMAL, string_buffer);
 #ifdef USE_CMS
-    displayWrite(osdDisplayPort, midCol - 8, midRow + 2, DISPLAYPORT_SEVERITY_NORMAL, CMS_STARTUP_HELP_TEXT1);
+    displayWrite(osdDisplayPort, midCol - 8, midRow + 2,  DISPLAYPORT_SEVERITY_NORMAL, CMS_STARTUP_HELP_TEXT1);
     displayWrite(osdDisplayPort, midCol - 4, midRow + 3, DISPLAYPORT_SEVERITY_NORMAL, CMS_STARTUP_HELP_TEXT2);
     displayWrite(osdDisplayPort, midCol - 4, midRow + 4, DISPLAYPORT_SEVERITY_NORMAL, CMS_STARTUP_HELP_TEXT3);
 #endif
@@ -652,7 +641,7 @@ static void osdUpdateStats(void)
         stats.min_voltage = value;
     }
 
-    value = getAmperage();
+    value = getAmperage() / 100;
     if (stats.max_current < value) {
         stats.max_current = value;
     }
@@ -887,7 +876,7 @@ static bool osdDisplayStat(int statistic, uint8_t displayRow)
 
     case OSD_STAT_MAX_CURRENT:
         if (batteryConfig()->currentMeterSource != CURRENT_METER_NONE) {
-            osdPrintFloat(buff, SYM_NONE, stats.max_current / 100.0f, "", 2, false, SYM_AMP);
+            tfp_sprintf(buff, "%d%c", stats.max_current, SYM_AMP);
             osdDisplayStatisticLabel(midCol, displayRow, "MAX CURRENT", buff);
             return true;
         }
@@ -1081,6 +1070,7 @@ static void osdRenderStatsBegin(void)
     osdStatsRenderingState.index = 0;
 }
 
+
 // call repeatedly until it returns true which indicates that all stats have been rendered.
 static bool osdRenderStatsContinue(void)
 {
@@ -1106,6 +1096,7 @@ static bool osdRenderStatsContinue(void)
             return false;
         }
     }
+
 
     bool renderedStat = false;
 
@@ -1203,15 +1194,15 @@ static timeDelta_t osdShowArmed(void)
     if ((osdConfig()->logo_on_arming == OSD_LOGO_ARMING_ON) || ((osdConfig()->logo_on_arming == OSD_LOGO_ARMING_FIRST) && !ARMING_FLAG(WAS_EVER_ARMED))) {
         uint8_t midRow = osdDisplayPort->rows / 2;
         uint8_t midCol = osdDisplayPort->cols / 2;
-        osdDrawLogo(midCol - (OSD_LOGO_COLS) / 2, midRow - 5, osdConfig()->arming_logo);
-        ret = osdConfig()->logo_on_arming_duration * 100 * 1000; // convert to microseconds
+        osdDrawLogo(midCol - (OSD_LOGO_COLS) / 2, midRow - 5);
+        ret = osdConfig()->logo_on_arming_duration * 1e5;
     } else {
         ret = (REFRESH_1S / 2);
     }
-    displayWrite(osdDisplayPort, midCol - (strlen("ARMED") / 2), midRow, DISPLAYPORT_SEVERITY_NORMAL, "ARMED");
+    displayWrite(osdDisplayPort, midCol - (strlen("SEND IT") / 2), midRow, DISPLAYPORT_SEVERITY_NORMAL, "SEND IT");
 
-    if (isCrashFlipModeActive()) {
-        displayWrite(osdDisplayPort, midCol - (strlen(CRASHFLIP_WARNING) / 2), midRow + 1, DISPLAYPORT_SEVERITY_NORMAL, CRASHFLIP_WARNING);
+    if (isFlipOverAfterCrashActive()) {
+        displayWrite(osdDisplayPort, midCol - (strlen(CRASH_FLIP_WARNING) / 2), midRow + 1, DISPLAYPORT_SEVERITY_NORMAL, CRASH_FLIP_WARNING);
     }
 
     return ret;
@@ -1251,16 +1242,9 @@ STATIC_UNIT_TESTED bool osdProcessStats1(timeUs_t currentTimeUs)
 
     if (ARMING_FLAG(ARMED)) {
         osdUpdateStats();
-        int deltaT = cmpTimeUs(currentTimeUs, lastTimeUs);
+        timeUs_t deltaT = currentTimeUs - lastTimeUs;
         osdFlyTime += deltaT;
         stats.armed_time += deltaT;
-#ifdef USE_LAUNCH_CONTROL
-        if (!isLaunchControlActive()) {
-            osdLaunchTime += deltaT;
-        } else {
-            osdLaunchTime = 0;
-        }
-#endif
     } else if (osdStatsEnabled) {  // handle showing/hiding stats based on OSD disable switch position
         if (displayIsGrabbed(osdDisplayPort)) {
             osdStatsEnabled = false;
@@ -1297,15 +1281,15 @@ STATIC_UNIT_TESTED bool osdProcessStats1(timeUs_t currentTimeUs)
     return refreshStatsRequired;
 }
 
-static void osdProcessStats2(timeUs_t currentTimeUs)
+void osdProcessStats2(timeUs_t currentTimeUs)
 {
     displayBeginTransaction(osdDisplayPort, DISPLAY_TRANSACTION_OPT_RESET_DRAWING);
 
     if (resumeRefreshAt) {
         if (cmp32(currentTimeUs, resumeRefreshAt) < 0) {
-            // in timeout period, check sticks for activity or CRASHFLIP switch to resume display.
+            // in timeout period, check sticks for activity or CRASH FLIP switch to resume display.
             if (!ARMING_FLAG(ARMED) &&
-                (IS_HI(THROTTLE) || IS_HI(PITCH) || IS_RC_MODE_ACTIVE(BOXCRASHFLIP))) {
+                (IS_HI(THROTTLE) || IS_HI(PITCH) || IS_RC_MODE_ACTIVE(BOXFLIPOVERAFTERCRASH))) {
                 resumeRefreshAt = currentTimeUs;
             }
             return;
@@ -1325,14 +1309,18 @@ static void osdProcessStats2(timeUs_t currentTimeUs)
 #endif
 }
 
-static void osdProcessStats3(void)
+void osdProcessStats3(void)
 {
 #if defined(USE_ACC)
     osdGForce = 0.0f;
     if (sensors(SENSOR_ACC)
        && (VISIBLE(osdElementConfig()->item_pos[OSD_G_FORCE]) || osdStatGetState(OSD_STAT_MAX_G_FORCE))) {
             // only calculate the G force if the element is visible or the stat is enabled
-        osdGForce = acc.accMagnitude;
+        for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
+            const float a = acc.accADC[axis];
+            osdGForce += a * a;
+        }
+        osdGForce = sqrtf(osdGForce) * acc.dev.acc_1G_rec;
     }
 #endif
 }
@@ -1348,9 +1336,7 @@ typedef enum {
     OSD_STATE_UPDATE_ALARMS,
     OSD_STATE_REFRESH_PREARM,
     OSD_STATE_UPDATE_CANVAS,
-    // Elements are handled in two steps, drawing into a buffer, and then sending to the display
-    OSD_STATE_DRAW_ELEMENT,
-    OSD_STATE_DISPLAY_ELEMENT,
+    OSD_STATE_UPDATE_ELEMENTS,
     OSD_STATE_UPDATE_HEARTBEAT,
     OSD_STATE_COMMIT,
     OSD_STATE_TRANSFER,
@@ -1374,20 +1360,11 @@ bool osdUpdateCheck(timeUs_t currentTimeUs, timeDelta_t currentDeltaTimeUs)
 
             // Determine time of next update
             if (osdUpdateDueUs) {
-                // Ensure there's not a flurry of updates to catch up
-                while (cmpTimeUs(osdUpdateDueUs, currentTimeUs) < 0) {
-                    osdUpdateDueUs += OSD_UPDATE_INTERVAL_US;
-                }
+                osdUpdateDueUs += OSD_UPDATE_INTERVAL_US;
             } else {
                 osdUpdateDueUs = currentTimeUs + OSD_UPDATE_INTERVAL_US;
             }
         }
-    }
-
-    // Early check for displayPort blocking OSD action, avoids repeated calls to main task function (osdUpdate)
-    // and avoids scheduler issues with spikes in task duration.
-    if ((osdState == OSD_STATE_CHECK || osdState == OSD_STATE_TRANSFER) && displayIsTransferInProgress(osdDisplayPort)) {
-        return false;
     }
 
     return (osdState != OSD_STATE_IDLE);
@@ -1398,8 +1375,7 @@ void osdUpdate(timeUs_t currentTimeUs)
 {
     static uint16_t osdStateDurationFractionUs[OSD_STATE_COUNT] = { 0 };
     static uint32_t osdElementDurationFractionUs[OSD_ITEM_COUNT] = { 0 };
-    static bool moreElementsToDraw;
-
+    static bool firstPass = true;
     timeUs_t executeTimeUs;
     osdState_e osdCurrentState = osdState;
 
@@ -1484,16 +1460,14 @@ void osdUpdate(timeUs_t currentTimeUs)
     case OSD_STATE_UPDATE_ALARMS:
         osdUpdateAlarms();
 
-        // Pass through OSD_STATE_UPDATE_CANVAS even when short circuiting (resumeRefreshAt), for stats purposes (task rate).
-        osdState = OSD_STATE_UPDATE_CANVAS;
+        if (resumeRefreshAt) {
+            osdState = OSD_STATE_TRANSFER;
+        } else {
+            osdState = OSD_STATE_UPDATE_CANVAS;
+        }
         break;
 
     case OSD_STATE_UPDATE_CANVAS:
-        if (resumeRefreshAt) {
-            osdState = OSD_STATE_TRANSFER;
-            break;
-        }
-
         // Hide OSD when OSDSW mode is active
         if (IS_RC_MODE_ACTIVE(BOXOSD)) {
             displayClearScreen(osdDisplayPort, DISPLAY_CLEAR_NONE);
@@ -1522,37 +1496,41 @@ void osdUpdate(timeUs_t currentTimeUs)
         }
 #endif // USE_GPS
 
-        osdSyncBlink(currentTimeUs);
+        osdSyncBlink();
 
-        osdState = OSD_STATE_DRAW_ELEMENT;
+        osdState = OSD_STATE_UPDATE_ELEMENTS;
 
         break;
 
-    case OSD_STATE_DRAW_ELEMENT:
+    case OSD_STATE_UPDATE_ELEMENTS:
         {
-            uint8_t osdElement = osdGetActiveElement();
+            bool moreElements = true;
 
-            timeUs_t startElementTime = micros();
+            for (int rendered = 0; moreElements; rendered++) {
+                uint8_t osdCurrentElement = osdGetActiveElement();
 
-            moreElementsToDraw = osdDrawNextActiveElement(osdDisplayPort);
+                timeUs_t startElementTime = micros();
 
-            executeTimeUs = micros() - startElementTime;
+                timeUs_t anticipatedEndUs = startElementTime + (osdElementDurationFractionUs[osdCurrentElement] >> OSD_EXEC_TIME_SHIFT);
 
-            if (executeTimeUs > (osdElementDurationFractionUs[osdElement] >> OSD_EXEC_TIME_SHIFT)) {
-                osdElementDurationFractionUs[osdElement] = executeTimeUs << OSD_EXEC_TIME_SHIFT;
-            } else if (osdElementDurationFractionUs[osdElement] > 0) {
-                // Slowly decay the max time
-                osdElementDurationFractionUs[osdElement]--;
-            }
+                if ((rendered > 0) && cmpTimeUs(anticipatedEndUs, currentTimeUs) > OSD_ELEMENT_RENDER_TARGET) {
+                    // There isn't time to render the next element
+                    break;
+                }
 
-            if (osdIsRenderPending()) {
-                osdState = OSD_STATE_DISPLAY_ELEMENT;
+                moreElements = osdDrawNextActiveElement(osdDisplayPort, currentTimeUs);
 
-                // Render the element just drawn
-                break;
-            }
+                executeTimeUs = micros() - startElementTime;
 
-            if (moreElementsToDraw) {
+                if (executeTimeUs > (osdElementDurationFractionUs[osdCurrentElement] >> OSD_EXEC_TIME_SHIFT)) {
+                    osdElementDurationFractionUs[osdCurrentElement] = executeTimeUs << OSD_EXEC_TIME_SHIFT;
+                } else if (osdElementDurationFractionUs[osdCurrentElement] > 0) {
+                    // Slowly decay the max time
+                    osdElementDurationFractionUs[osdCurrentElement]--;
+                }
+            };
+
+            if (moreElements) {
                 // There are more elements to draw
                 break;
             }
@@ -1564,29 +1542,6 @@ void osdUpdate(timeUs_t currentTimeUs)
 #endif // USE_SPEC_PREARM_SCREEN
             {
                 osdState = OSD_STATE_COMMIT;
-            }
-        }
-        break;
-
-    case OSD_STATE_DISPLAY_ELEMENT:
-        {
-            const bool pendingDisplay = osdDisplayActiveElement();
-
-            if (!pendingDisplay) {
-                if (moreElementsToDraw) {
-                    // There is no more to draw so advance to the next element
-                    osdState = OSD_STATE_DRAW_ELEMENT;
-                } else {
-                    // Displaying the current element is complete and there are no futher elements to draw so advance
-#ifdef USE_SPEC_PREARM_SCREEN
-                    if (!ARMING_FLAG(ARMED) && osdConfig()->osd_show_spec_prearm) {
-                        osdState = OSD_STATE_REFRESH_PREARM;
-                    } else
-#endif // USE_SPEC_PREARM_SCREEN
-                    {
-                        osdState = OSD_STATE_COMMIT;
-                    }
-                }
             }
         }
         break;
@@ -1622,6 +1577,7 @@ void osdUpdate(timeUs_t currentTimeUs)
             break;
         }
 
+        firstPass = false;
         osdState = OSD_STATE_IDLE;
 
         break;
@@ -1635,18 +1591,21 @@ void osdUpdate(timeUs_t currentTimeUs)
     if (!schedulerGetIgnoreTaskExecTime()) {
         executeTimeUs = micros() - currentTimeUs;
 
-        if (executeTimeUs > (osdStateDurationFractionUs[osdCurrentState] >> OSD_EXEC_TIME_SHIFT)) {
-            osdStateDurationFractionUs[osdCurrentState] = executeTimeUs << OSD_EXEC_TIME_SHIFT;
-        } else if (osdStateDurationFractionUs[osdCurrentState] > 0) {
-            // Slowly decay the max time
-            osdStateDurationFractionUs[osdCurrentState]--;
+
+        // On the first pass no element groups will have been formed, so all elements will have been
+        // rendered which is unrepresentative, so ignore
+        if (!firstPass) {
+            if (executeTimeUs > (osdStateDurationFractionUs[osdCurrentState] >> OSD_EXEC_TIME_SHIFT)) {
+                osdStateDurationFractionUs[osdCurrentState] = executeTimeUs << OSD_EXEC_TIME_SHIFT;
+            } else if (osdStateDurationFractionUs[osdCurrentState] > 0) {
+                // Slowly decay the max time
+                osdStateDurationFractionUs[osdCurrentState]--;
+            }
         }
     }
 
     if (osdState == OSD_STATE_IDLE) {
-        schedulerSetNextStateTime((osdStateDurationFractionUs[OSD_STATE_CHECK] >> OSD_EXEC_TIME_SHIFT));
-    } else if (osdState == OSD_STATE_DRAW_ELEMENT) {
-        schedulerSetNextStateTime((osdElementDurationFractionUs[osdGetActiveElement()] >> OSD_EXEC_TIME_SHIFT) + OSD_ELEMENT_MARGIN);
+        schedulerSetNextStateTime((osdStateDurationFractionUs[OSD_STATE_CHECK] >> OSD_EXEC_TIME_SHIFT) + OSD_TASK_MARGIN);
     } else {
         schedulerSetNextStateTime((osdStateDurationFractionUs[osdState] >> OSD_EXEC_TIME_SHIFT) + OSD_TASK_MARGIN);
     }
